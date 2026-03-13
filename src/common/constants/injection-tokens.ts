@@ -1,0 +1,5 @@
+export const INJECTION_TOKENS = {
+  DRIZZLE: 'DRIZZLE_CLIENT',
+  EVENT_BUS: 'EVENT_BUS',
+  REDIS: 'REDIS_CLIENT',
+} as const;

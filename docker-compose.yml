@@ -1,0 +1,26 @@
+
+
+services:
+
+  postgres:
+    image: postgres:16
+    container_name: hr_saas_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: app_user
+      POSTGRES_PASSWORD: secure_password
+      POSTGRES_DB: hr_saas_db
+    ports:
+      - "55432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7
+    container_name: hr_saas_redis
+    restart: always
+    ports:
+      - "6379:6379"
+
+volumes:
+  postgres_data:
