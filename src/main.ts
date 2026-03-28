@@ -1,5 +1,3 @@
-// src/main.ts
-
 import { NestFactory, Reflector } from '@nestjs/core';
 import {
   ValidationPipe,
@@ -26,46 +24,38 @@ async function bootstrap() {
   const configService = app.get(ConfigService);
   const port = configService.get<number>('app.port', 3000);
   const apiPrefix = configService.get<string>('app.apiPrefix', 'api');
-  
 
-  // ✅ Global prefix now includes version: /api/v1
-  // ✅ Exclude health check from prefix & versioning
+  // Global prefix
   app.setGlobalPrefix(apiPrefix, {
     exclude: [{ path: 'health', method: RequestMethod.GET }],
   });
 
-  // ✅ URI Versioning enabled with default v1
+  // URI Versioning
   app.enableVersioning({
     type: VersioningType.URI,
-    
   });
 
-  // ✅ Global Validation Pipe
+  // Global Validation Pipe
   app.useGlobalPipes(
     new ValidationPipe({
       whitelist: true,
       forbidNonWhitelisted: true,
       transform: true,
-      transformOptions: {
-        enableImplicitConversion: true,
-      },
-      validationError: {
-        target: false,
-        value: false,
-      },
+      transformOptions: { enableImplicitConversion: true },
+      validationError: { target: false, value: false },
     }),
   );
 
-  // ✅ Global Exception Filter
+  // Global Exception Filter
   app.useGlobalFilters(new GlobalExceptionFilter());
 
-  // ✅ Global Interceptors (New)
+  // Global Interceptors
   app.useGlobalInterceptors(
     new TimeoutInterceptor(),
     new ResponseTransformInterceptor(),
   );
 
-  // ✅ CORS Configuration
+  // CORS
   app.enableCors({
     origin: configService.get<string>('CORS_ORIGINS', '*').split(','),
     credentials: true,
@@ -85,7 +75,6 @@ async function bootstrap() {
     maxAge: 86400,
   });
 
-  // ✅ Graceful Shutdown
   app.enableShutdownHooks();
 
   await app.listen(port);

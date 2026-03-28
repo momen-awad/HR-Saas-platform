@@ -1,5 +1,3 @@
-// src/common/events/event-registry.ts
-
 /**
  * Central registry of all domain event types in the system.
  *
@@ -50,8 +48,14 @@ export const DomainEvents = {
   USER_LOGIN: 'auth.user_login',
   USER_LOGIN_FAILED: 'auth.user_login_failed',
   USER_PASSWORD_CHANGED: 'auth.password_changed',
+
+  // ── RBAC ──
+  RBAC_ROLE_CREATED: 'rbac.role_created',
+  RBAC_ROLE_UPDATED: 'rbac.role_updated',
+  RBAC_ROLE_DELETED: 'rbac.role_deleted',
+  RBAC_ROLE_ASSIGNED: 'rbac.role_assigned',
+  RBAC_ROLE_REVOKED: 'rbac.role_revoked',
 } as const;
 
 export type DomainEventType =
   (typeof DomainEvents)[keyof typeof DomainEvents];
-

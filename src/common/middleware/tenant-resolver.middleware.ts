@@ -1,5 +1,3 @@
-// src/common/middleware/tenant-resolver.middleware.ts
-
 import {
   Injectable,
   NestMiddleware,
@@ -10,11 +8,9 @@ import {
 } from '@nestjs/common';
 import { Request, Response, NextFunction } from 'express';
 import { eq } from 'drizzle-orm';
-
 import { INJECTION_TOKENS } from '../constants/injection-tokens';
 import type { DrizzleDatabase } from '../../database/database.providers';
 import { tenants } from '../../database/schema';
-
 import { TenantContext } from '../context/tenant.context';
 import { RequestContext } from '../context/request.context';
 
@@ -27,12 +23,50 @@ export class TenantResolverMiddleware implements NestMiddleware {
     private readonly db: DrizzleDatabase,
   ) {}
 
-  async use(req: Request, res: Response, next: NextFunction): Promise<void> {
-    const tenantId = (req.headers['x-tenant-id'] as string)?.trim();
+  private extractTenantId(req: Request): string | undefined {
+    // Priority 1: From Authorization header (JWT)
+    const authHeader = req.headers['authorization'];
+    if (authHeader?.startsWith('Bearer ')) {
+      try {
+        const token = authHeader.substring(7);
+        const payload = JSON.parse(
+          Buffer.from(token.split('.')[1], 'base64').toString(),
+        );
+        if (payload.tenantId) {
+          return payload.tenantId;
+        }
+      } catch {
+        // ignore malformed token
+      }
+    }
 
+    // Priority 2: From header (development / pre-auth)
+    const headerTenantId = req.headers['x-tenant-id'] as string;
+    if (headerTenantId) {
+      return headerTenantId.trim();
+    }
+
+    return undefined;
+  }
+
+  async use(req: Request, res: Response, next: NextFunction): Promise<void> {
+    const url = req.originalUrl;
+
+    // ✅ Bypass public/system routes (safeguard)
+    if (
+      url.startsWith('/api/auth') ||
+      url.startsWith('/api/v1/auth') ||
+      url.startsWith('/api/admin/tenants') ||
+      url.startsWith('/api/v1/admin/tenants') ||
+      url.startsWith('/health')
+    ) {
+      return next();
+    }
+
+    const tenantId = this.extractTenantId(req);
     if (!tenantId) {
       throw new UnauthorizedException(
-        'Tenant context is required. Provide X-Tenant-ID header.',
+        'Tenant context is required. Provide X-Tenant-ID header or authenticate.',
       );
     }
 
@@ -50,11 +84,9 @@ export class TenantResolverMiddleware implements NestMiddleware {
       if (tenant.status === 'suspended') {
         throw new ForbiddenException('Tenant account suspended.');
       }
-
       if (tenant.status === 'terminated') {
         throw new ForbiddenException('Tenant account terminated.');
       }
-
       throw new ForbiddenException('Tenant is not active.');
     }
 
@@ -75,10 +107,8 @@ export class TenantResolverMiddleware implements NestMiddleware {
   }
 
   private validateUuid(value: string): void {
-    // تم تبسيط الـ Regex ليقبل أي UUID صالح للاختبارات والبيانات الحقيقية
     const uuidRegex =
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
     if (!uuidRegex.test(value)) {
       throw new UnauthorizedException('Invalid tenant ID format');
     }

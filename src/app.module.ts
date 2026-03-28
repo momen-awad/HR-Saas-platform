@@ -1,52 +1,62 @@
-// src/app.module.ts
-
-import { Module, MiddlewareConsumer, NestModule } from '@nestjs/common';
+import { Module, MiddlewareConsumer, NestModule, RequestMethod } from '@nestjs/common';
+import { APP_GUARD } from '@nestjs/core';
 import { AppConfigModule } from './config/config.module';
 import { DatabaseModule } from './database/database.module';
 import { RlsModule } from './database/rls/rls.module';
+import { RedisModule } from './providers/redis/redis.module';
+import { CommonModule } from './common/common.module';
+import { EventBusModule } from './common/events/event-bus.module';
+import { JobsModule } from './jobs/jobs.module';
+import { AppSchedulerModule } from './scheduler/scheduler.module';
 import { HealthModule } from './common/health/health.module';
+import { AuthModule } from './modules/auth/auth.module';
+import { TenantModule } from './modules/tenant/tenant.module';
 import { RequestIdMiddleware } from './common/middleware/request-id.middleware';
 import { TenantResolverMiddleware } from './common/middleware/tenant-resolver.middleware';
-import { DebugModule } from './debug/debug.module';
-import { TestTenantController } from './test-tenant.controller';
-import { CommonModule } from './common/common.module';
-import { TenantDebugController } from './debug/tenant-debug.controller';
-import { EventBusModule } from './common/events/event-bus.module';
-
+import { JwtAuthGuard } from './modules/auth/guards/jwt-auth.guard';
+import { RbacModule } from './modules/rbac/rbac.module';
 @Module({
   imports: [
     AppConfigModule,
     DatabaseModule,
     RlsModule,
-    EventBusModule, 
-    HealthModule,
-    DebugModule,
+    RedisModule,
     CommonModule,
-    
+    EventBusModule,
+    JobsModule,
+    AppSchedulerModule,
+    HealthModule,
+    RbacModule,
+    AuthModule,
+    TenantModule,
     
   ],
-  controllers: [
-    // ✅ مكانه الصح هنا فقط
-    TestTenantController,
+  providers: [
+    {
+      provide: APP_GUARD,
+      useClass: JwtAuthGuard,
+    },
   ],
 })
 export class AppModule implements NestModule {
   configure(consumer: MiddlewareConsumer) {
-    // 1️⃣ Request ID middleware — applies to all routes
     consumer
       .apply(RequestIdMiddleware)
       .forRoutes('*path');
 
-    // 2️⃣ Tenant resolver middleware — applies to all routes EXCEPT public paths
     consumer
       .apply(TenantResolverMiddleware)
       .exclude(
-        'health',                     // Health check
-        'api/v1/auth/login',           // Auth routes
-        'api/v1/auth/register',
-        'api/v1/auth/forgot-password',
-        'api/v1/auth/reset-password',
-        'api/v1/admin/tenants/*path',   // Admin routes (system-level)
+        // Health
+        { path: 'health', method: RequestMethod.GET },
+        { path: 'health/*path', method: RequestMethod.GET },
+
+        // Auth (بدون /api prefix)
+        { path: 'auth/*path', method: RequestMethod.ALL },
+
+        // Admin tenants (بدون /api prefix)
+        { path: 'admin/tenants', method: RequestMethod.ALL },
+        { path: 'admin/tenants/*path', method: RequestMethod.ALL },
       )
       .forRoutes('*path');
   }

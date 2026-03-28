@@ -9,90 +9,133 @@ import {
   integer,
   text,
   index,
+  uniqueIndex,
 } from 'drizzle-orm/pg-core';
 
+// ─────────────────────────────────────────────────────────────────────────────
+// EVENT OUTBOX TABLE
+// ─────────────────────────────────────────────────────────────────────────────
 /**
- * Event Outbox table — the persistent store for domain events.
+ * Transactional outbox — الـ persistent store للـ domain events.
  *
- * The transactional outbox pattern:
- * 1. Business service writes event to this table in the SAME transaction
- *    as the business data change.
- * 2. A background dispatcher polls this table for pending events.
- * 3. Dispatcher publishes events to in-process handlers.
- * 4. Dispatcher marks events as processed.
+ * الـ pattern:
+ * 1. الـ business service بتكتب الإيفنت في نفس الـ transaction مع الـ business data.
+ * 2. الـ OutboxDispatcher بيعمل poll على الجدول ده.
+ * 3. الـ dispatcher بيبعت الإيفنت للـ in-process handlers.
+ * 4. الـ dispatcher بيعلّم الإيفنت كـ processed.
  *
- * This guarantees at-least-once delivery of events even if the
- * application crashes after the business transaction commits.
- *
- * This table does NOT have RLS because:
- * - The dispatcher processes events for ALL tenants
- * - tenant_id is stored for routing/context, not for isolation
- * - Only the system (not users) reads this table
+ * الجدول ده مفيش عليه RLS لأن:
+ * - الـ dispatcher بيتعامل مع كل الـ tenants
+ * - الـ tenant_id موجود للـ context routing بس، مش للـ isolation
+ * - بس الـ application code (مش الـ users) هو اللي بيقرأ الجدول ده
  */
 export const eventOutbox = pgTable(
   'event_outbox',
   {
     id: uuid('id').primaryKey().defaultRandom(),
 
-    // Event identification
+    // تعريف الإيفنت
     eventType: varchar('event_type', { length: 200 }).notNull(),
-    eventId: uuid('event_id').notNull(), // Deduplication key from the event
+    eventId:   uuid('event_id').notNull(), // مفتاح الـ deduplication من الإيفنت نفسه
 
-    // Payload
+    // الـ payload
     payload: jsonb('payload').notNull(),
 
-    // Tenant scope (for context setting when processing)
+    // الـ tenant scope (للـ context setting عند المعالجة)
     tenantId: uuid('tenant_id'),
 
-    // Who triggered this event
+    // مين عمل الإيفنت ده
     triggeredBy: varchar('triggered_by', { length: 255 }),
 
-    // Processing status
+    // حالة المعالجة:
+    //   pending → processing → processed
+    //   pending → processing → failed → (retry) → processing → ...
+    //   failed  → dead_letter  (بعد استنفاد الـ retries)
     status: varchar('status', { length: 50 }).notNull().default('pending'),
-    // pending → processing → processed
-    // pending → processing → failed → (retry) → processing → processed
-    // pending → processing → failed → dead_letter
 
-    // Retry management
-    retryCount: integer('retry_count').notNull().default(0),
-    maxRetries: integer('max_retries').notNull().default(5),
+    // إدارة الـ retries
+    retryCount:  integer('retry_count').notNull().default(0),
+    maxRetries:  integer('max_retries').notNull().default(5),
     nextRetryAt: timestamp('next_retry_at', { withTimezone: true }),
 
-    // Processing metadata
-    processedAt: timestamp('processed_at', { withTimezone: true }),
-    errorMessage: text('error_message'),
-    processingStartedAt: timestamp('processing_started_at', {
-      withTimezone: true,
-    }),
+    // metadata المعالجة
+    processedAt:         timestamp('processed_at',          { withTimezone: true }),
+    processingStartedAt: timestamp('processing_started_at', { withTimezone: true }),
+    errorMessage:        text('error_message'),
 
-    // Timestamps
-    createdAt: timestamp('created_at', { withTimezone: true })
-      .notNull()
-      .defaultNow(),
+    // timestamps
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
-    // Primary query: find pending events to process
-    pendingIdx: index('idx_outbox_pending').on(
-      table.status,
-      table.createdAt,
-    ),
+    // الـ primary query: إيجاد الـ pending events للمعالجة
+    pendingIdx: index('idx_outbox_pending').on(table.status, table.createdAt),
 
-    // Cleanup query: find old processed events
-    processedIdx: index('idx_outbox_processed_cleanup').on(
-      table.status,
-      table.processedAt,
-    ),
+    // الـ cleanup query: إيجاد الـ processed القديمة
+    processedIdx: index('idx_outbox_processed_cleanup').on(table.status, table.processedAt),
 
-    // Deduplication check
+    // الـ deduplication check
     eventIdIdx: index('idx_outbox_event_id').on(table.eventId),
 
-    // Tenant-scoped queries (for debugging)
-    tenantIdx: index('idx_outbox_tenant').on(
+    // الـ tenant-scoped queries (للـ debugging)
+    tenantIdx: index('idx_outbox_tenant').on(table.tenantId, table.createdAt),
+  }),
+);
+
+export type EventOutboxRecord    = typeof eventOutbox.$inferSelect;
+export type NewEventOutboxRecord = typeof eventOutbox.$inferInsert;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OUTBOX PROCESSED EVENTS TABLE  ← جديد: للـ idempotency
+// ─────────────────────────────────────────────────────────────────────────────
+/**
+ * جدول الـ idempotency — بيمنع معالجة نفس الإيفنت أكتر من مرة لكل handler.
+ *
+ * ليه جدول منفصل وملا بنعتمد على onConflictDoNothing في كل handler؟
+ * - مش كل العمليات بيكون فيها جدول واضح نعمل عليه conflict check
+ * - الـ notification، الـ audit، وغيرها محتاجة idempotency صريحة
+ * - بيدي رؤية مركزية على كل handler اشتغل على أي إيفنت
+ *
+ * الـ unique constraint على (event_id, handler_name) يضمن إن:
+ * - نفس الإيفنت ممكن يتعالج من أكتر من handler (طبيعي)
+ * - نفس الـ handler مش هيعالج نفس الإيفنت أكتر من مرة (idempotency)
+ *
+ * الجدول ده مفيش عليه RLS بنفس سبب event_outbox.
+ */
+export const outboxProcessedEvents = pgTable(
+  'outbox_processed_events',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+
+    // الـ idempotency key: مين عالج إيه
+    eventId:     uuid('event_id').notNull(),
+    handlerName: varchar('handler_name', { length: 200 }).notNull(),
+
+    // للـ debugging والـ monitoring
+    eventType:   varchar('event_type', { length: 200 }),
+    tenantId:    uuid('tenant_id'),
+    processedAt: timestamp('processed_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    // الـ unique constraint الأساسي للـ idempotency
+    uniqueEventHandler: uniqueIndex('idx_processed_event_handler_unique').on(
+      table.eventId,
+      table.handlerName,
+    ),
+
+    // للـ debugging: إيجاد كل الـ handlers اللي اشتغلت على إيفنت معين
+    eventIdx: index('idx_processed_event_id').on(table.eventId),
+
+    // للـ cleanup: إيجاد الـ records القديمة
+    processedAtIdx: index('idx_processed_at').on(table.processedAt),
+
+    // للـ per-tenant cleanup والـ debugging في المستقبل
+    // لو عندك tenants كتير وحبيت تعمل cleanup أو query لـ tenant معين
+    tenantProcessedIdx: index('idx_processed_tenant_processed_at').on(
       table.tenantId,
-      table.createdAt,
+      table.processedAt,
     ),
   }),
 );
 
-export type EventOutboxRecord = typeof eventOutbox.$inferSelect;
-export type NewEventOutboxRecord = typeof eventOutbox.$inferInsert;
+export type OutboxProcessedEvent    = typeof outboxProcessedEvents.$inferSelect;
+export type NewOutboxProcessedEvent = typeof outboxProcessedEvents.$inferInsert;
