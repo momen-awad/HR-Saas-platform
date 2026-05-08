@@ -10,8 +10,7 @@ import { ErrorCodes } from './error-codes';
  *
  * Usage in services:
  *   throw new ResourceNotFoundException('Employee', employeeId);
- *   throw new InsufficientLeaveBalanceException(5, 3, 'annual');
- *   throw new PayrollAlreadyFinalizedException(runId);
+ *   throw new DeviceAlreadyRegisteredException(deviceId);
  */
 
 // ── General ──
@@ -105,6 +104,124 @@ export class EmployeeNotActiveException extends BusinessException {
       `Employee is not active. Current status: ${currentStatus}`,
       HttpStatus.BAD_REQUEST,
       { employeeId, currentStatus },
+    );
+  }
+}
+
+export class EmployeeAlreadyTerminatedException extends BusinessException {
+  constructor(employeeId: string) {
+    super(
+      ErrorCodes.EMPLOYEE_ALREADY_TERMINATED,
+      'Employee is already terminated.',
+      HttpStatus.CONFLICT,
+      { employeeId },
+    );
+  }
+}
+
+export class EmployeeInvalidStatusTransitionException extends BusinessException {
+  constructor(
+    employeeId: string,
+    currentStatus: string,
+    targetStatus: string,
+  ) {
+    super(
+      ErrorCodes.EMPLOYEE_INVALID_STATUS_TRANSITION,
+      `Cannot transition employee status from '${currentStatus}' to '${targetStatus}'.`,
+      HttpStatus.BAD_REQUEST,
+      { employeeId, currentStatus, targetStatus },
+    );
+  }
+}
+
+export class EmployeeNumberTakenException extends BusinessException {
+  constructor(employeeNumber: string) {
+    super(
+      ErrorCodes.EMPLOYEE_NUMBER_TAKEN,
+      `Employee number '${employeeNumber}' is already in use within this tenant.`,
+      HttpStatus.CONFLICT,
+      { employeeNumber },
+    );
+  }
+}
+
+export class EmployeeUserAlreadyEmployedException extends BusinessException {
+  constructor(userId: string) {
+    super(
+      ErrorCodes.EMPLOYEE_USER_ALREADY_EMPLOYED,
+      'This user already has an employee profile in this tenant.',
+      HttpStatus.CONFLICT,
+      { userId },
+    );
+  }
+}
+
+// ── Device ──
+
+export class DeviceAlreadyRegisteredException extends BusinessException {
+  constructor(deviceId: string) {
+    super(
+      ErrorCodes.DEVICE_ALREADY_REGISTERED,
+      `Device '${deviceId}' is already registered for this employee.`,
+      HttpStatus.CONFLICT,
+      { deviceId },
+    );
+  }
+}
+
+export class DeviceLimitReachedException extends BusinessException {
+  constructor(current: number, max: number) {
+    super(
+      ErrorCodes.DEVICE_LIMIT_REACHED,
+      `Device limit reached. You have ${current} registered device(s); the maximum is ${max}.`,
+      HttpStatus.FORBIDDEN,
+      { current, max },
+    );
+  }
+}
+
+export class DeviceBelongsToOtherEmployeeException extends BusinessException {
+  constructor(deviceId: string) {
+    super(
+      ErrorCodes.DEVICE_BELONGS_TO_OTHER_EMPLOYEE,
+      `Device '${deviceId}' is already registered to another employee in this tenant.`,
+      HttpStatus.CONFLICT,
+      { deviceId },
+    );
+  }
+}
+
+// ── Department ──
+
+export class DepartmentCircularReferenceException extends BusinessException {
+  constructor(departmentId: string, parentId: string) {
+    super(
+      ErrorCodes.DEPARTMENT_CIRCULAR_REFERENCE,
+      'Cannot set parent department: this would create a circular reference in the hierarchy.',
+      HttpStatus.CONFLICT,
+      { departmentId, parentId },
+    );
+  }
+}
+
+export class DepartmentHasActiveChildrenException extends BusinessException {
+  constructor(departmentId: string, childCount: number) {
+    super(
+      ErrorCodes.DEPARTMENT_HAS_ACTIVE_CHILDREN,
+      `Cannot deactivate department: it has ${childCount} active sub-department(s). Deactivate them first.`,
+      HttpStatus.CONFLICT,
+      { departmentId, childCount },
+    );
+  }
+}
+
+export class DepartmentHasActiveEmployeesException extends BusinessException {
+  constructor(departmentId: string, employeeCount: number) {
+    super(
+      ErrorCodes.DEPARTMENT_HAS_ACTIVE_EMPLOYEES,
+      `Cannot deactivate department: it has ${employeeCount} active employee(s). Reassign them first.`,
+      HttpStatus.CONFLICT,
+      { departmentId, employeeCount },
     );
   }
 }

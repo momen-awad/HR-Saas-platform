@@ -13,9 +13,16 @@ export const DomainEvents = {
   TENANT_SUSPENDED: 'tenant.suspended',
   TENANT_ACTIVATED: 'tenant.activated',
 
+  // ── Department ──
+  DEPARTMENT_CREATED: 'department.created',
+  DEPARTMENT_UPDATED: 'department.updated',
+  DEPARTMENT_DEACTIVATED: 'department.deactivated',
+
   // ── Employee ──
   EMPLOYEE_CREATED: 'employee.created',
   EMPLOYEE_UPDATED: 'employee.updated',
+  EMPLOYEE_STATUS_CHANGED: 'employee.status_changed',
+  EMPLOYEE_SALARY_UPDATED: 'employee.salary_updated', 
   EMPLOYEE_TERMINATED: 'employee.terminated',
   EMPLOYEE_SUSPENDED: 'employee.suspended',
   EMPLOYEE_ACTIVATED: 'employee.activated',

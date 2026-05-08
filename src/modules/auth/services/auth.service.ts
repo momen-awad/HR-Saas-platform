@@ -1,3 +1,5 @@
+// src/modules/auth/services/auth.service.ts
+
 import {
   Injectable,
   Logger,
@@ -32,7 +34,8 @@ import {
   InvalidCredentialsException,
   AccountLockedException,
 } from '../../../common/exceptions/business-exceptions';
-import { RbacService } from '../../rbac/services/rbac.service';   // <-- إضافة RBAC
+import { RbacService } from '../../rbac/services/rbac.service';
+import { EmployeeFacade } from '../../employee/facades/employee.facade';
 
 @Injectable()
 export class AuthService {
@@ -42,84 +45,122 @@ export class AuthService {
     private readonly userRepo: UserRepository,
     private readonly tokenService: TokenService,
     private readonly eventBus: EventBusService,
-    private readonly rbacService: RbacService,                   // <-- حقن RbacService
+    private readonly rbacService: RbacService,
+    private readonly employeeFacade: EmployeeFacade,
     @Inject(INJECTION_TOKENS.DRIZZLE)
     private readonly db: DrizzleDatabase,
   ) {}
 
-  /**
-   * Authenticate a user and issue tokens.
-   */
+  // ─────────────────────────────────────────────────────────────────────────
+  // LOGIN
+  // ─────────────────────────────────────────────────────────────────────────
+
   async login(
     dto: LoginDto,
     ipAddress: string,
     userAgent: string,
   ): Promise<LoginResponse> {
-    // Step 1: Find user
+    // 1. Find user by email
     const user = await this.userRepo.findByEmail(dto.email);
     if (!user) {
       await this.emitLoginFailed(dto.email, null, ipAddress, 'user_not_found');
       throw new InvalidCredentialsException();
     }
 
-    // Step 2: Check account status
+    // 2. Account must be active
     if (!user.isActive) {
       await this.emitLoginFailed(dto.email, user.id, ipAddress, 'account_inactive');
-      throw new ForbiddenException('Account is deactivated. Contact your administrator.');
+      throw new ForbiddenException(
+        'Account is deactivated. Contact your administrator.',
+      );
     }
 
-    // Check lockout
+    // 3. Brute-force lockout check
     if (user.lockedUntil && user.lockedUntil > new Date()) {
       await this.emitLoginFailed(dto.email, user.id, ipAddress, 'account_locked');
       throw new AccountLockedException(user.lockedUntil);
     }
 
-    // Step 3: Verify password
-    const isPasswordValid = await HashUtil.verifyPassword(dto.password, user.passwordHash);
+    // 4. Password verification
+    const isPasswordValid = await HashUtil.verifyPassword(
+      dto.password,
+      user.passwordHash,
+    );
     if (!isPasswordValid) {
       await this.handleFailedLogin(user.id, dto.email, ipAddress);
       throw new InvalidCredentialsException();
     }
 
-    // Step 4: Validate tenant
+    // 5. Validate tenant is active
     const tenant = await this.validateTenant(dto.tenantId);
 
-    // Step 5: Resolve employee context
-    // SIMPLIFIED: Until Module 3.2 (Employee Profiles) is built,
-    // we use the user ID as a placeholder for employee ID.
-    const employeeContext = await this.resolveEmployeeContext(user.id, dto.tenantId);
+    // 6. Resolve employee context via EmployeeFacade
+    //    This replaces the previous placeholder that used userId as employeeId.
+    const employeeContext = await this.employeeFacade.resolveEmployeeContext(
+      user.id,
+      dto.tenantId,
+    );
 
-    // Step 6: Get effective permissions and roles from RBAC
+    if (!employeeContext) {
+      // User has no employee profile in this tenant
+      await this.emitLoginFailed(
+        dto.email,
+        user.id,
+        ipAddress,
+        'no_employee_in_tenant',
+      );
+      throw new UnauthorizedException(
+        'No employee profile found for this tenant. Contact your administrator.',
+      );
+    }
+
+    // 7. Employee must not be suspended or terminated
+    if (
+      employeeContext.status === 'suspended' ||
+      employeeContext.status === 'terminated'
+    ) {
+      await this.emitLoginFailed(
+        dto.email,
+        user.id,
+        ipAddress,
+        `employee_${employeeContext.status}`,
+      );
+      throw new ForbiddenException(
+        `Your employee account is ${employeeContext.status}. Contact your administrator.`,
+      );
+    }
+
+    // 8. Resolve roles and permissions from RBAC
     const effective = await this.rbacService.getEffectivePermissions(
       employeeContext.employeeId,
       dto.tenantId,
     );
-    const roles = effective.roles.map(r => r.slug);
+    const roles = effective.roles.map((r) => r.slug);
     const permissions = effective.permissions;
 
-    // Step 7: Build JWT payload
+    // 9. Build JWT payload
     const jwtPayload: Omit<JwtPayload, 'iat' | 'exp' | 'jti'> = {
       sub: user.id,
       tenantId: dto.tenantId,
       employeeId: employeeContext.employeeId,
       roles,
-      permissions,           // <-- تضمين الصلاحيات
+      permissions,
       email: user.email,
-      tz: employeeContext.timezone || tenant.defaultTimezone,
+      tz: employeeContext.timezone ?? tenant.defaultTimezone,
     };
 
-    // Step 8: Generate token pair
+    // 10. Issue token pair
     const tokens = await this.tokenService.generateTokenPair(
       jwtPayload,
-      null, // new family (new login)
+      null,
       ipAddress,
       userAgent,
     );
 
-    // Step 9: Reset failed attempts and update last login
+    // 11. Reset failed attempts and record last login
     await this.userRepo.resetFailedAttempts(user.id);
 
-    // Step 10: Emit login event
+    // 12. Emit domain event
     await this.eventBus.emitAsync(
       new UserLoginEvent(
         dto.tenantId,
@@ -130,7 +171,6 @@ export class AuthService {
       ),
     );
 
-    // Build user info response
     const userInfo: AuthUserInfo = {
       userId: user.id,
       email: user.email,
@@ -138,19 +178,22 @@ export class AuthService {
       tenantId: dto.tenantId,
       tenantName: tenant.name,
       roles,
-      timezone: employeeContext.timezone || tenant.defaultTimezone,
+      timezone: employeeContext.timezone ?? tenant.defaultTimezone,
     };
 
     return { tokens, user: userInfo };
   }
 
-  /**
-   * Register a new user account.
-   */
+  // ─────────────────────────────────────────────────────────────────────────
+  // REGISTER
+  // ─────────────────────────────────────────────────────────────────────────
+
   async register(dto: RegisterDto): Promise<{ userId: string; email: string }> {
     const exists = await this.userRepo.existsByEmail(dto.email);
     if (exists) {
-      throw new ConflictException('An account with this email already exists.');
+      throw new ConflictException(
+        'An account with this email already exists.',
+      );
     }
 
     const passwordHash = await HashUtil.hashPassword(dto.password);
@@ -163,71 +206,95 @@ export class AuthService {
     return { userId: user.id, email: user.email };
   }
 
-  /**
-   * Refresh an access token using a refresh token.
-   */
+  // ─────────────────────────────────────────────────────────────────────────
+  // TOKEN REFRESH
+  // ─────────────────────────────────────────────────────────────────────────
+
   async refreshTokens(
     rawRefreshToken: string,
     ipAddress: string,
     userAgent: string,
   ): Promise<AuthTokens> {
-    const result = await this.tokenService.rotateRefreshToken(
+    const rotated = await this.tokenService.rotateRefreshToken(
       rawRefreshToken,
       ipAddress,
       userAgent,
     );
 
-    if (!result) {
+    if (!rotated) {
       throw new UnauthorizedException('Invalid or expired refresh token.');
     }
 
-    const user = await this.userRepo.findById(result.userId);
+    const user = await this.userRepo.findById(rotated.userId);
     if (!user || !user.isActive) {
-      await this.tokenService.revokeAllUserTokens(result.userId);
+      await this.tokenService.revokeAllUserTokens(rotated.userId);
       throw new UnauthorizedException('Account is no longer active.');
     }
 
-    const tenant = await this.validateTenant(result.tenantId);
-    const employeeContext = await this.resolveEmployeeContext(result.userId, result.tenantId);
+    const tenant = await this.validateTenant(rotated.tenantId);
 
-    // Fetch latest permissions and roles (may have changed)
+    // Re-resolve employee context to pick up any status changes since last login
+    const employeeContext = await this.employeeFacade.resolveEmployeeContext(
+      rotated.userId,
+      rotated.tenantId,
+    );
+
+    if (!employeeContext) {
+      throw new UnauthorizedException(
+        'Employee profile no longer exists in this tenant.',
+      );
+    }
+
+    if (
+      employeeContext.status === 'suspended' ||
+      employeeContext.status === 'terminated'
+    ) {
+      throw new ForbiddenException(
+        `Your employee account is ${employeeContext.status}.`,
+      );
+    }
+
+    // Re-resolve permissions — picks up any role changes since last token
     const effective = await this.rbacService.getEffectivePermissions(
       employeeContext.employeeId,
-      result.tenantId,
+      rotated.tenantId,
     );
-    const roles = effective.roles.map(r => r.slug);
+    const roles = effective.roles.map((r) => r.slug);
     const permissions = effective.permissions;
 
     const jwtPayload: Omit<JwtPayload, 'iat' | 'exp' | 'jti'> = {
       sub: user.id,
-      tenantId: result.tenantId,
+      tenantId: rotated.tenantId,
       employeeId: employeeContext.employeeId,
       roles,
       permissions,
       email: user.email,
-      tz: employeeContext.timezone || tenant.defaultTimezone,
+      tz: employeeContext.timezone ?? tenant.defaultTimezone,
     };
 
-    // Use the familyId from the rotated token
     return this.tokenService.generateTokenPair(
       jwtPayload,
-      result.familyId,
+      rotated.familyId,
       ipAddress,
       userAgent,
     );
   }
 
-  /**
-   * Logout — revoke all refresh tokens for user in current tenant.
-   */
+  // ─────────────────────────────────────────────────────────────────────────
+  // LOGOUT
+  // ─────────────────────────────────────────────────────────────────────────
+
   async logout(userId: string, tenantId: string): Promise<void> {
     await this.tokenService.revokeAllTokens(userId, tenantId);
-    this.logger.debug(`User logged out: ${userId} from tenant ${tenantId}`);
+    this.logger.debug(
+      `User logged out: ${userId} from tenant ${tenantId}`,
+    );
   }
 
-  /**
-   * Change password for the currently authenticated user.
-   */
+  // ─────────────────────────────────────────────────────────────────────────
+  // CHANGE PASSWORD
+  // ─────────────────────────────────────────────────────────────────────────
+
   async changePassword(
     userId: string,
     tenantId: string,
@@ -238,18 +305,28 @@ export class AuthService {
       throw new UnauthorizedException('User not found.');
     }
 
-    const isCurrentValid = await HashUtil.verifyPassword(dto.currentPassword, user.passwordHash);
+    const isCurrentValid = await HashUtil.verifyPassword(
+      dto.currentPassword,
+      user.passwordHash,
+    );
     if (!isCurrentValid) {
       throw new BadRequestException('Current password is incorrect.');
     }
 
-    const isSamePassword = await HashUtil.verifyPassword(dto.newPassword, user.passwordHash);
+    const isSamePassword = await HashUtil.verifyPassword(
+      dto.newPassword,
+      user.passwordHash,
+    );
     if (isSamePassword) {
-      throw new BadRequestException('New password must be different from the current password.');
+      throw new BadRequestException(
+        'New password must be different from the current password.',
+      );
     }
 
     const newHash = await HashUtil.hashPassword(dto.newPassword);
     await this.userRepo.updatePassword(userId, newHash);
+
+    // Revoke all refresh tokens — forces re-login on all devices
     await this.tokenService.revokeAllUserTokens(userId);
 
     await this.eventBus.emitAsync(
@@ -259,44 +336,34 @@ export class AuthService {
     this.logger.log(`Password changed for user: ${userId}`);
   }
 
-  // ── Private Helpers ──
+  // ─────────────────────────────────────────────────────────────────────────
+  // PRIVATE HELPERS
+  // ─────────────────────────────────────────────────────────────────────────
 
   /**
-   * Validate that the target tenant exists and is active.
+   * Validate that a tenant exists and is actively accepting logins.
    */
   private async validateTenant(tenantId: string) {
-    const result = await this.db
+    const [tenant] = await this.db
       .select()
       .from(tenants)
       .where(eq(tenants.id, tenantId))
       .limit(1);
-    const tenant = result[0];
+
     if (!tenant) {
       throw new UnauthorizedException('Tenant not found.');
     }
     if (tenant.status !== 'active') {
-      throw new ForbiddenException(`Tenant account is ${tenant.status}. Contact support.`);
+      throw new ForbiddenException(
+        `Tenant account is ${tenant.status}. Contact support.`,
+      );
     }
     return tenant;
   }
 
   /**
-   * Resolve employee context within a tenant.
-   * SIMPLIFIED VERSION — will be replaced when Module 3.2 is built.
-   */
-  private async resolveEmployeeContext(
-    userId: string,
-    tenantId: string,
-  ): Promise<{ employeeId: string; timezone: string | null }> {
-    // Placeholder: use userId as employeeId
-    return {
-      employeeId: userId,
-      timezone: null,
-    };
-  }
-
-  /**
-   * Handle a failed login attempt.
+   * Increment failed login counter and lock the account when threshold
+   * is reached. Emits a LoginFailedEvent regardless.
    */
   private async handleFailedLogin(
     userId: string,
@@ -304,20 +371,24 @@ export class AuthService {
     ipAddress: string,
   ): Promise<void> {
     const attempts = await this.userRepo.incrementFailedAttempts(userId);
+
     if (attempts >= APP_CONSTANTS.MAX_FAILED_LOGIN_ATTEMPTS) {
       const lockedUntil = new Date(
         Date.now() + APP_CONSTANTS.LOCKOUT_DURATION_MINUTES * 60 * 1000,
       );
       await this.userRepo.lockAccount(userId, lockedUntil);
       this.logger.warn(
-        `Account locked: ${userId} (${email}) after ${attempts} failed attempts. Locked until ${lockedUntil.toISOString()}`,
+        `Account locked: ${userId} (${email}) after ${attempts} failed attempts. ` +
+          `Locked until ${lockedUntil.toISOString()}`,
       );
     }
+
     await this.emitLoginFailed(email, userId, ipAddress, 'invalid_password');
   }
 
   /**
-   * Emit login failure event.
+   * Fire-and-forget LoginFailedEvent.
+   * Never throws — a failure here must not mask the real error.
    */
   private async emitLoginFailed(
     email: string,
@@ -326,9 +397,11 @@ export class AuthService {
     reason: string,
   ): Promise<void> {
     try {
-      await this.eventBus.emitAsync(new LoginFailedEvent(email, userId, ipAddress, reason));
+      await this.eventBus.emitAsync(
+        new LoginFailedEvent(email, userId, ipAddress, reason),
+      );
     } catch {
-      // Don't let event emission failure affect the login response
+      // Intentionally swallowed — event emission must not affect login response
     }
   }
 }
